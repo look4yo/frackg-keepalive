@@ -22,7 +22,7 @@ from pathlib import Path
 from neo4j import GraphDatabase
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from keepalive import resolve_database  # noqa: E402
+from aura_common import resolve_database  # noqa: E402
 
 NODE_QUERY = """
 MATCH (n)

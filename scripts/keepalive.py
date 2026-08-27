@@ -13,50 +13,21 @@ Environment:
   NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD   required
   NEO4J_DATABASE                          optional; auto-detected when empty
   APP_URL                                 Streamlit app to wake up
-  MIN_NODES                                 alert threshold (default 200)
+  MIN_NODES                               alert threshold (default 200)
 """
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import requests
 from neo4j import GraphDatabase
 
-COUNTS = """
-MATCH (n)
-WITH count(n) AS nodes
-OPTIONAL MATCH ()-[r]->()
-RETURN nodes, count(r) AS rels
-"""
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aura_common import COUNTS, resolve_database, server_version  # noqa: E402
 
 LABEL_BREAKDOWN = "MATCH (n:`{label}`) RETURN count(n) AS c"
-
-
-def resolve_database(driver, configured: str) -> str:
-    """Newer Aura instances name their database after the instance ID, not 'neo4j'."""
-    if configured:
-        return configured
-    try:
-        with driver.session(database="system") as session:
-            standard = [
-                rec["name"]
-                for rec in session.run(
-                    "SHOW DATABASES YIELD name, type, currentStatus "
-                    "RETURN name, type, currentStatus"
-                )
-                if rec["type"] == "standard" and rec["currentStatus"] == "online"
-            ]
-    except Exception as exc:  # restricted auth or a server without multi-db rights
-        print(f"WARNING: could not probe databases ({exc}); using 'neo4j'")
-        return "neo4j"
-    if "neo4j" in standard:
-        return "neo4j"
-    if len(standard) == 1:
-        print(f"note: auto-selected database '{standard[0]}'")
-        return standard[0]
-    print(f"WARNING: ambiguous databases {standard}; using 'neo4j'")
-    return "neo4j"
 
 
 def ping_app(url: str) -> None:
@@ -104,17 +75,7 @@ def main() -> int:
                 "CALL db.labels() YIELD label RETURN label ORDER BY label")]
             breakdown = {label: session.run(LABEL_BREAKDOWN.format(label=label)).single()["c"]
                          for label in labels}
-            try:
-                # Aura returns two components (Neo4j Kernel and Cypher); take the kernel.
-                recs = session.run(
-                    "CALL dbms.components() YIELD name, versions, edition "
-                    "RETURN name, versions[0] AS version, edition").data()
-                kernel = next((r for r in recs if "kernel" in r["name"].lower()),
-                              recs[0] if recs else None)
-                server = (f"{kernel['name']}/{kernel['version']}/{kernel['edition']}"
-                          if kernel else "unknown")
-            except Exception:
-                server = "unknown"
+            server = server_version(session)
     except Exception as exc:
         print(f"ERROR: Neo4j query failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
