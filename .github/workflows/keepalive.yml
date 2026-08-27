@@ -4,6 +4,21 @@ on:
   schedule:
     - cron: "17 */12 * * *"
   workflow_dispatch:
+    inputs:
+      min_nodes:
+        description: "Fail if the graph has fewer nodes than this"
+        required: false
+        default: "200"
+
+# The heartbeat step pushes a commit, which is what keeps GitHub from disabling this
+# schedule after 60 days without repository activity (that is what silently killed the
+# original workflow on 2026-07-16 and let Aura wipe the instance).
+permissions:
+  contents: write
+
+concurrency:
+  group: keep-frackg-alive
+  cancel-in-progress: false
 
 jobs:
   keepalive:
@@ -11,6 +26,8 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -19,40 +36,33 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade neo4j requests
 
-      - name: Keep Streamlit and Neo4j alive
+      - name: Wake the app and verify the graph is still there
         env:
           APP_URL: "https://frackg-s2ka2iaeutit6wnzar23x7.streamlit.app/"
           NEO4J_URI: ${{ secrets.NEO4J_URI }}
           NEO4J_USER: ${{ secrets.NEO4J_USER }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_DATABASE: ${{ secrets.NEO4J_DATABASE }}
+          MIN_NODES: ${{ github.event.inputs.min_nodes || vars.MIN_NODES || '200' }}
+        run: python scripts/keepalive.py
+
+      - name: Refresh the repository clock
+        env:
+          AFTER: ${{ vars.HEARTBEAT_AFTER_DAYS || '14' }}
         run: |
-          python - <<'PY'
-          import os
-          import requests
-          from neo4j import GraphDatabase
-
-          app_url = os.environ["APP_URL"]
-          response = requests.get(app_url, timeout=60)
-          print("Streamlit status:", response.status_code)
-          response.raise_for_status()
-
-          missing = [
-              name
-              for name in ("NEO4J_URI", "NEO4J_USER", "NEO4J_PASSWORD")
-              if not os.environ.get(name)
-          ]
-          if missing:
-              raise RuntimeError(f"Missing GitHub Actions secrets: {', '.join(missing)}")
-
-          driver = GraphDatabase.driver(
-              os.environ["NEO4J_URI"],
-              auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]),
-          )
-
-          try:
-              with driver.session() as session:
-                  ok = session.run("RETURN 1 AS ok").single()["ok"]
-                  print("Neo4j status:", ok)
-          finally:
-              driver.close()
-          PY
+          set -euo pipefail
+          last=$(git log -1 --format=%ct)
+          age=$(( ( $(date +%s) - last ) / 86400 ))
+          echo "latest commit is ${age} day(s) old; heartbeat threshold is ${AFTER} day(s)"
+          if [ "$age" -lt "$AFTER" ]; then
+            echo "recent enough -- no heartbeat commit needed"
+            exit 0
+          fi
+          printf 'FRAC-KG keepalive heartbeat\n\nLast run: %s\nWorkflow: %s/%s/actions/runs/%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" \
+            "$GITHUB_RUN_ID" > HEARTBEAT.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add HEARTBEAT.md
+          git commit -m "chore: refresh repository clock so the schedule stays enabled"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
