@@ -47,6 +47,10 @@ jobs:
         run: python scripts/keepalive.py
 
       - name: Refresh the repository clock
+        # Must also run when the check above failed: a broken secret or a wiped graph is
+        # exactly when the 60-day inactivity clock still needs resetting, otherwise the
+        # schedule gets disabled mid-outage and stops reporting at all.
+        if: ${{ !cancelled() }}
         env:
           AFTER: ${{ vars.HEARTBEAT_AFTER_DAYS || '14' }}
         run: |
